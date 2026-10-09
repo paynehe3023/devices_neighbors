@@ -20,7 +20,7 @@ VSVersionInfo(
             StringStruct(u'FileVersion', u'v1.0.4'),
             StringStruct(u'InternalName', u'网络拓扑扫描工具'),
             StringStruct(u'LegalCopyright', u'Copyright (C) 2026 payne'),
-            StringStruct(u'OriginalFilename', u'网络拓扑扫描工具.exe'),
+            StringStruct(u'OriginalFilename', u'network-topology-scanner.exe'),
             StringStruct(u'ProductName', u'网络拓扑扫描工具'),
             StringStruct(u'ProductVersion', u'v1.0.4')
           ]

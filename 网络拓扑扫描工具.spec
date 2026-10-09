@@ -34,7 +34,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='网络拓扑扫描工具',
+    name='network-topology-scanner',
     icon='image/appImage2.ico',
     version='version_info.txt',
     debug=False,
