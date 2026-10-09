@@ -292,9 +292,12 @@ def launch_updater(downloaded_exe: Path) -> Path:
         encoding="ascii",
     )
 
+    # 只用 CREATE_NO_WINDOW (隐藏控制台)。切勿加 DETACHED_PROCESS(0x8):
+    # 那会让 cmd.exe 失去控制台, 脚本中的管道/find/ping 会失效, 整个替换流程静默失败,
+    # 表现为"点安装后没有新版"。实测: 带 0x8 时脚本 0.2s 直接退出且未替换文件。
     flags = 0
     if os.name == "nt":
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | 0x00000008
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         subprocess.Popen(
             [

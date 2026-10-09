@@ -1,7 +1,7 @@
 {
-  "version": "1.0.3",
+  "version": "1.0.4",
   "download_url": "https://github.com/paynehe3023/devices_neighbors/releases/latest/download/network-topology-scanner.exe",
-  "notes": "v1.0.3：下载时显示进度条与百分比（总大小未知时显示循环动画）；修复 40G/100G 端口名规范化、Eth-Trunk 成员口识别、WAN/MPLS 逻辑口混入、接入交换机角色误判；界面自适应（列不再溢出、支持横向滚动）；关于窗口去除标题栏图标；打包补齐 customtkinter/manuf 依赖。",
+  "notes": "v1.0.4：修复自动安装更新失败的问题（更新脚本误加了 DETACHED_PROCESS 导致无控制台，替换流程静默失效）；更新进度条仅在下载时显示；关于窗口去除标题栏图标；下载地址改用 ASCII 附件名；修复 40G/100G 端口名规范化、Eth-Trunk 成员口识别、WAN/MPLS 逻辑口混入、接入交换机角色误判；界面自适应（列不再溢出、支持横向滚动）；打包补齐 customtkinter/manuf 依赖。",
   "published_at": "2026-10-09",
-  "sha256": "6e2b09686280ee2e4c7b8b3da5dc5696a07dfeb67e40484ae434a61290c8553b"
+  "sha256": "dc9bfbc110dcc4d858028525661057424e7cff05dfe0e9339df5510877e46962"
 }
