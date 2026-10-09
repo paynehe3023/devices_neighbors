@@ -11,15 +11,22 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 import get_port_neighbors as topo
+import updater
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 TREE_COLS = ("端口", "状态", "方向", "对端设备", "对端端口", "对端IP", "对端MAC", "终端识别", "主机名")
+
+
+def resource_path(relative):
+    base = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
+    return Path(base) / relative
 
 
 class QueueWriter(io.TextIOBase):
@@ -66,13 +73,45 @@ class ToolTip:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+        self._set_taskbar_identity()
+        self._set_window_icon()
         self.title("网络拓扑扫描工具")
         self.geometry("980x680")
         self.q = queue.Queue()
+        self.update_q = queue.Queue()
         self.all_data = []
         self.worker = None
+        self.about_window = None
+        self._update_checking = False
+        self._update_downloading = False
         self._build_ui()
         self.after(120, self._poll)
+
+    def _set_taskbar_identity(self):
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "payne.devices_neighbors"
+            )
+        except Exception:
+            pass
+
+    def _set_window_icon(self):
+        ico = resource_path("image/appImage2.ico")
+        png = resource_path("image/appImage2.png")
+        try:
+            if ico.exists():
+                self.iconbitmap(default=str(ico))
+        except Exception:
+            pass
+        try:
+            if png.exists():
+                self._window_icon = tk.PhotoImage(file=str(png))
+                self.iconphoto(True, self._window_icon)
+        except Exception:
+            pass
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -111,6 +150,7 @@ class App(ctk.CTk):
         ctk.CTkButton(qf, text="导出CSV报表", width=110, command=self._export).pack(side="left", padx=4)
         self.status_var = ctk.StringVar(value="就绪")
         ctk.CTkLabel(qf, textvariable=self.status_var, text_color="gray").pack(side="right", padx=6)
+        ctk.CTkButton(qf, text="关于", width=60, command=self._open_about).pack(side="right", padx=4)
 
         self.log_box = ctk.CTkTextbox(self, height=120, font=("Consolas", 13))
         self.log_box.pack(fill="x", padx=10, pady=4)
@@ -167,12 +207,178 @@ class App(ctk.CTk):
                     self._set_scan_buttons(True)
         except queue.Empty:
             pass
+        self._poll_updates()
         self.after(120, self._poll)
 
     def _set_scan_buttons(self, enabled):
         state = "normal" if enabled else "disabled"
         self.btn_single.configure(state=state)
         self.btn_all.configure(state=state)
+
+    # ---------------- 关于 / 更新 ----------------
+    def _open_about(self):
+        if self.about_window and self.about_window.winfo_exists():
+            self.about_window.lift()
+            return
+
+        win = ctk.CTkToplevel(self)
+        self.about_window = win
+        win.title("关于")
+        win.geometry("430x250")
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+        win.protocol("WM_DELETE_WINDOW", self._close_about)
+
+        ctk.CTkLabel(
+            win, text="网络拓扑扫描工具", font=ctk.CTkFont(size=22, weight="bold")
+        ).pack(pady=(24, 8))
+        ctk.CTkLabel(
+            win,
+            text=f"版本 v{topo.APP_VERSION}\n作者：payne",
+            justify="center",
+            text_color="#c8c8c8",
+        ).pack(pady=(0, 14))
+        self.about_status_var = ctk.StringVar(value="可检查 GitHub 仓库中的最新版本")
+        ctk.CTkLabel(
+            win, textvariable=self.about_status_var, text_color="#9fc5e8"
+        ).pack(pady=(0, 12))
+
+        buttons = ctk.CTkFrame(win, fg_color="transparent")
+        buttons.pack()
+        self.btn_check_update = ctk.CTkButton(
+            buttons, text="检查更新", width=110, command=self._check_updates
+        )
+        self.btn_check_update.pack(side="left", padx=5)
+        ctk.CTkButton(
+            buttons, text="关闭", width=90, fg_color="#555555",
+            hover_color="#666666", command=self._close_about
+        ).pack(side="left", padx=5)
+
+    def _close_about(self):
+        if self.about_window and self.about_window.winfo_exists():
+            self.about_window.destroy()
+        self.about_window = None
+
+    def _check_updates(self):
+        if self._update_checking or self._update_downloading:
+            return
+        self._update_checking = True
+        self.about_status_var.set("正在检查更新...")
+        self.btn_check_update.configure(state="disabled", text="检查中...")
+        threading.Thread(target=self._worker_check_update, daemon=True).start()
+
+    def _worker_check_update(self):
+        try:
+            info = updater.check_for_update(topo.APP_VERSION)
+            self.update_q.put(("check_ok", info))
+        except Exception as exc:
+            self.update_q.put(("check_error", str(exc)))
+
+    def _start_update_download(self, info):
+        if self._update_downloading:
+            return
+        self._update_downloading = True
+        self.about_status_var.set(f"正在下载 v{info.version}...")
+        self.btn_check_update.configure(state="disabled", text="下载中...")
+        threading.Thread(
+            target=self._worker_download_update, args=(info,), daemon=True
+        ).start()
+
+    def _worker_download_update(self, info):
+        last_bucket = -1
+
+        def report(received, total):
+            nonlocal last_bucket
+            percent = int(received * 100 / total) if total else 0
+            bucket = percent // 5
+            if bucket != last_bucket:
+                last_bucket = bucket
+                self.update_q.put(("download_progress", (received, total, percent)))
+
+        try:
+            path = updater.download_update(
+                info.download_url,
+                expected_sha256=info.sha256,
+                progress=report,
+            )
+            self.update_q.put(("download_ok", (info, path)))
+        except Exception as exc:
+            self.update_q.put(("download_error", str(exc)))
+
+    def _poll_updates(self):
+        while True:
+            try:
+                kind, payload = self.update_q.get_nowait()
+            except queue.Empty:
+                return
+            if kind in ("check_ok", "check_error"):
+                self._update_checking = False
+            elif kind in ("download_ok", "download_error"):
+                self._update_downloading = False
+            if not self.about_window or not self.about_window.winfo_exists():
+                continue
+            if kind == "check_ok":
+                self.btn_check_update.configure(state="normal", text="检查更新")
+                if payload is None:
+                    self.about_status_var.set("当前已是最新版本")
+                    messagebox.showinfo(
+                        "检查更新", "当前已是最新版本", parent=self.about_window
+                    )
+                    continue
+                self.about_status_var.set(f"发现新版本 v{payload.version}")
+                notes = f"\n\n更新说明：\n{payload.notes}" if payload.notes else ""
+                if messagebox.askyesno(
+                    "发现更新",
+                    f"当前版本：v{topo.APP_VERSION}\n"
+                    f"最新版本：v{payload.version}{notes}\n\n是否下载更新？",
+                    parent=self.about_window,
+                ):
+                    self._start_update_download(payload)
+            elif kind == "check_error":
+                self.btn_check_update.configure(state="normal", text="检查更新")
+                self.about_status_var.set("检查更新失败")
+                messagebox.showerror("检查更新", payload, parent=self.about_window)
+            elif kind == "download_progress":
+                received, total, percent = payload
+                if total:
+                    self.about_status_var.set(
+                        f"正在下载：{percent}%  "
+                        f"({received / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB)"
+                    )
+                else:
+                    self.about_status_var.set(
+                        f"正在下载：{received / 1024 / 1024:.1f} MB"
+                    )
+            elif kind == "download_ok":
+                info, path = payload
+                self.btn_check_update.configure(state="normal", text="检查更新")
+                self.about_status_var.set(f"v{info.version} 已下载完成")
+                if not updater.can_self_update():
+                    messagebox.showinfo(
+                        "更新已下载",
+                        f"开发模式不会自动替换程序。\n下载位置：{path}",
+                        parent=self.about_window,
+                    )
+                    continue
+                if messagebox.askyesno(
+                    "安装更新",
+                    f"v{info.version} 已下载完成。\n是否退出程序并自动安装更新？",
+                    parent=self.about_window,
+                ):
+                    try:
+                        updater.launch_updater(path)
+                    except Exception as exc:
+                        messagebox.showerror(
+                            "安装更新", str(exc), parent=self.about_window
+                        )
+                        continue
+                    self.about_status_var.set("正在重启并安装更新...")
+                    self.after(300, self.destroy)
+            elif kind == "download_error":
+                self.btn_check_update.configure(state="normal", text="检查更新")
+                self.about_status_var.set("下载更新失败")
+                messagebox.showerror("下载更新", payload, parent=self.about_window)
 
     # ---------------- 扫描 ----------------
     def _start_scan(self, recursive):

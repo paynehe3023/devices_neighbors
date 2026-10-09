@@ -8,6 +8,7 @@ hiddenimports = ['textfsm']
 datas += collect_data_files('textfsm')
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+datas += [('image/appImage2.png', 'image'), ('image/appImage2.ico', 'image')]
 
 
 a = Analysis(
@@ -32,6 +33,8 @@ exe = EXE(
     a.datas,
     [],
     name='网络拓扑扫描工具',
+    icon='image/appImage2.ico',
+    version='version_info.txt',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

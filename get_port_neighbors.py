@@ -32,6 +32,7 @@ from collections import defaultdict
 from netmiko import ConnectHandler
 
 # ==================== 配置区 ====================
+APP_VERSION = "1.0.0"
 # 凭据不落盘: 优先环境变量, 其次由交互模式/GUI/批量CSV在运行时注入
 USERNAME = os.environ.get("TOPO_USERNAME", "admin")
 PASSWORD = os.environ.get("TOPO_PASSWORD", "")
