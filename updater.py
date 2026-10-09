@@ -207,6 +207,11 @@ def download_update(
                         progress(received, total)
     except HTTPError as exc:
         part.unlink(missing_ok=True)
+        if exc.code == 404:
+            raise UpdateError(
+                "下载地址不存在(HTTP 404): 请确认已在 GitHub Release 上传 exe 附件, "
+                "且附件名与 version.json 的 download_url 完全一致"
+            ) from exc
         raise UpdateError(f"下载更新失败: HTTP {exc.code}") from exc
     except (URLError, TimeoutError, OSError) as exc:
         part.unlink(missing_ok=True)

@@ -32,7 +32,7 @@ from collections import defaultdict
 from netmiko import ConnectHandler
 
 # ==================== 配置区 ====================
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.2"
 # 凭据不落盘: 优先环境变量, 其次由交互模式/GUI/批量CSV在运行时注入
 USERNAME = os.environ.get("TOPO_USERNAME", "admin")
 PASSWORD = os.environ.get("TOPO_PASSWORD", "")
@@ -79,13 +79,16 @@ ROLE_CORE, ROLE_CTRL, ROLE_SW, ROLE_END = 3, 2, 1, 0
 
 
 def normalize_port(port_name):
-    """接口名规范化: GigabitEthernet0/0/3 -> GE0/0/3"""
+    """接口名规范化: GigabitEthernet0/0/3 -> GE0/0/3
+    长前缀必须按长度降序匹配, 否则 40G/100G 会被 GigabitEthernet 子串抢先截断。"""
     if not port_name:
         return ""
     port_name = port_name.strip()
-    for long, short in (("GigabitEthernet", "GE"), ("XGigabitEthernet", "XGE"),
-                        ("10GigabitEthernet", "10GE"), ("Ethernet", "Eth")):
-        port_name = re.sub(rf"^{long}", short, port_name, flags=re.IGNORECASE)
+    for long, short in (("100GigabitEthernet", "100GE"), ("40GigabitEthernet", "40GE"),
+                        ("10GigabitEthernet", "10GE"), ("XGigabitEthernet", "XGE"),
+                        ("GigabitEthernet", "GE"), ("Ethernet", "Eth")):
+        if re.match(rf"^{long}(?![A-Za-z])", port_name, flags=re.IGNORECASE):
+            return short + port_name[len(long):]
     return port_name
 
 
@@ -172,27 +175,30 @@ def parse_arp(raw):
     return arp
 
 
+_NON_PHYSICAL = r'^(?:Vlanif|NULL|MEth|InLoopBack|Tunnel|Vbdif|MPLS|WAN|Virtual-Template|LoopBack)'
+
+
 def parse_ifbrief(raw):
-    """解析 'display interface brief' -> {端口: up/down} (排除Vlanif/NULL/MEth)"""
+    """解析 'display interface brief' -> {端口: up/down} (排除Vlanif/NULL/MEth等逻辑口)"""
     st = {}
     for line in raw.splitlines():
         m = re.match(r'^(\S+)\s+(up|down|\*down|#down)\s+(up|down|\*down|#down)', line)
         if m:
             p = m.group(1)
-            if re.match(r'^(Vlanif|NULL|MEth|InLoopBack|Tunnel|Vbdif)', p):
+            if re.match(_NON_PHYSICAL, p, flags=re.IGNORECASE):
                 continue
             st[normalize_port(p)] = "up" if m.group(2) == "up" else "down"
     return st
 
 
 def parse_ifdesc(raw):
-    """解析 'display interface description' -> {端口: 描述} (排除Vlanif/NULL/缩进成员行)"""
+    """解析 'display interface description' -> {端口: 描述} (排除逻辑口/缩进成员行)"""
     desc = {}
     for line in raw.splitlines():
         m = re.match(r'^(\S+)\s+(?:up|down|\*down|#down)\s+(?:up|down|\*down|#down)\s*(.*)$', line)
         if m:
             p = m.group(1)
-            if re.match(r'^(Vlanif|NULL|MEth|InLoopBack|Tunnel|Vbdif)', p):
+            if re.match(_NON_PHYSICAL, p, flags=re.IGNORECASE):
                 continue
             d = unescape_huawei(m.group(2).strip())
             if d:
@@ -218,9 +224,9 @@ def parse_eth_trunk(raw):
             cur = m.group(1)
             trunks[cur] = []
             continue
-        m = re.match(r'^\s*(?:GigabitEthernet|XGigabitEthernet|Ethernet)(\S+)\s+(Up|Down)\s+\d+', line)
+        m = re.match(r'^\s*(100GigabitEthernet|40GigabitEthernet|10GigabitEthernet|XGigabitEthernet|GigabitEthernet|Ethernet)(\S+)\s+(Up|Down)\s+\d+', line)
         if m and cur is not None:
-            trunks[cur].append(normalize_port("GigabitEthernet" + m.group(1)))
+            trunks[cur].append(normalize_port(m.group(1) + m.group(2)))
     return trunks
 
 
@@ -247,13 +253,12 @@ def role_of(name, model="", sys_desc=""):
         return ROLE_CORE
     if any(k in t for k in ("ac6507", "airengine", "9700s", "wlan", "controller")):
         return ROLE_CTRL
-    if any(k in t for k in ("switch", "router", "s57")):
+    # 接入交换机: 关键字(switch/router/s57) 或 命名约定(SW-/SW_/-SW/ACC/交换机)
+    if any(k in t for k in ("switch", "router", "s57", "acc", "交换机")):
+        return ROLE_SW
+    if re.search(r'(?:^|[^a-z])sw(?:[^a-z]|$)', name.lower()):
         return ROLE_SW
     return ROLE_END
-
-
-def _natkey(p):
-    return [int(x) if x.isdigit() else x for x in re.split(r'(\d+)', p)]
 
 
 def _dns_encode_name(name):

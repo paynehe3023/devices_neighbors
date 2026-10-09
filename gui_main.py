@@ -76,7 +76,8 @@ class App(ctk.CTk):
         self._set_taskbar_identity()
         self._set_window_icon()
         self.title("网络拓扑扫描工具")
-        self.geometry("980x680")
+        self.geometry("1120x700")
+        self.minsize(900, 560)
         self.q = queue.Queue()
         self.update_q = queue.Queue()
         self.all_data = []
@@ -165,14 +166,19 @@ class App(ctk.CTk):
         self.tree = ttk.Treeview(tf, columns=TREE_COLS, show="headings", height=12)
         for c in TREE_COLS:
             self.tree.heading(c, text=c)
-        widths = {"端口": 90, "状态": 55, "方向": 80, "对端设备": 160, "对端端口": 110,
-                  "对端IP": 130, "对端MAC": 130, "终端识别": 180, "主机名": 140}
+        widths = {"端口": 80, "状态": 50, "方向": 70, "对端设备": 150, "对端端口": 100,
+                  "对端IP": 120, "对端MAC": 120, "终端识别": 160, "主机名": 120}
         for c in TREE_COLS:
-            self.tree.column(c, width=widths.get(c, 100), anchor="w")
+            self.tree.column(c, width=widths.get(c, 100), minwidth=40, stretch=True, anchor="w")
         vsb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(tf, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        # grid 布局: 表格随窗口自适应拉伸, 滚动条贴边 (窄窗口下可横向滚动, 不再裁切表头)
+        tf.grid_rowconfigure(0, weight=1)
+        tf.grid_columnconfigure(0, weight=1)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
         # 右键菜单: 复制单元格/整行/整列/全部(供 Excel 粘贴)
         self.tree_menu = tk.Menu(self, tearoff=0)
         self.tree_menu.add_command(label="复制单元格", command=self._copy_cell)
@@ -226,6 +232,9 @@ class App(ctk.CTk):
         win.title("关于")
         win.geometry("430x250")
         win.resizable(False, False)
+        # 关于窗口不显示标题栏图标 (用 1x1 透明图覆盖, 否则会带出默认蓝色方块图标)
+        self._blank_icon = tk.PhotoImage(width=1, height=1)
+        win.iconphoto(False, self._blank_icon)
         win.transient(self)
         win.grab_set()
         win.protocol("WM_DELETE_WINDOW", self._close_about)
