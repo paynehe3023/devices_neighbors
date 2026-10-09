@@ -10,7 +10,7 @@ datas += collect_data_files('manuf')          # manuf 的 OUI 数据库(无扩�
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 hiddenimports += ['manuf', 'customtkinter', 'darkdetect']
-datas += [('image/appImage2.png', 'image'), ('image/appImage2.ico', 'image')]
+datas += [('image/appImage2.png', 'image'), ('image/appImage2.ico', 'image'), ('image/blank.ico', 'image')]
 
 
 a = Analysis(

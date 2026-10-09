@@ -84,6 +84,7 @@ class App(ctk.CTk):
         self.worker = None
         self.about_window = None
         self.about_progress = None
+        self.about_buttons = None
         self._update_checking = False
         self._update_downloading = False
         self._build_ui()
@@ -231,11 +232,17 @@ class App(ctk.CTk):
         win = ctk.CTkToplevel(self)
         self.about_window = win
         win.title("关于")
-        win.geometry("430x300")
+        win.geometry("430x250")
         win.resizable(False, False)
-        # 关于窗口不显示标题栏图标 (用 1x1 透明图覆盖, 否则会带出默认蓝色方块图标)
-        self._blank_icon = tk.PhotoImage(width=1, height=1)
-        win.iconphoto(False, self._blank_icon)
+        # 关于窗口不显示标题栏图标: 用全透明 .ico (Tk 的 PhotoImage 会丢 alpha 渲染成黑块,
+        # 而 .ico 带 alpha 通道; 调用 iconbitmap 同时会置位 CTk 的标记, 阻止其 200ms 后
+        # 覆盖成内置蓝色图标)
+        try:
+            blank = resource_path("image/blank.ico")
+            if blank.exists():
+                win.iconbitmap(str(blank))
+        except Exception:
+            pass
         win.transient(self)
         win.grab_set()
         win.protocol("WM_DELETE_WINDOW", self._close_about)
@@ -252,15 +259,15 @@ class App(ctk.CTk):
         self.about_status_var = ctk.StringVar(value="可检查 GitHub 仓库中的最新版本")
         ctk.CTkLabel(
             win, textvariable=self.about_status_var, text_color="#9fc5e8"
-        ).pack(pady=(0, 8))
+        ).pack(pady=(0, 12))
 
-        # 下载进度条 (空闲时 0 值, 下载时推进; 总大小未知时切换为循环动画)
+        # 下载进度条: 空闲时不显示, 仅下载时 pack 出来 (总大小未知时切换为循环动画)
         self.about_progress = ctk.CTkProgressBar(win, width=340, height=10, mode="determinate")
         self.about_progress.set(0)
-        self.about_progress.pack(pady=(0, 12))
 
-        buttons = ctk.CTkFrame(win, fg_color="transparent")
-        buttons.pack()
+        self.about_buttons = ctk.CTkFrame(win, fg_color="transparent")
+        self.about_buttons.pack()
+        buttons = self.about_buttons
         self.btn_check_update = ctk.CTkButton(
             buttons, text="检查更新", width=110, command=self._check_updates
         )
@@ -275,6 +282,29 @@ class App(ctk.CTk):
             self.about_window.destroy()
         self.about_window = None
         self.about_progress = None
+        self.about_buttons = None
+
+    def _show_progress(self):
+        """下载开始时把进度条显示出来 (窗口随之增高, 避开空闲时的空占位)"""
+        if not self.about_progress or not self.about_window:
+            return
+        try:
+            if not self.about_progress.winfo_ismapped():
+                self.about_window.geometry("430x300")
+                self.about_progress.pack(before=self.about_buttons, pady=(0, 12))
+        except Exception:
+            pass
+
+    def _hide_progress(self):
+        """下载结束/失败后收起进度条, 恢复空闲外观"""
+        if not self.about_progress or not self.about_window:
+            return
+        try:
+            if self.about_progress.winfo_ismapped():
+                self.about_progress.pack_forget()
+                self.about_window.geometry("430x250")
+        except Exception:
+            pass
 
     def _check_updates(self):
         if self._update_checking or self._update_downloading:
@@ -297,6 +327,7 @@ class App(ctk.CTk):
         self._update_downloading = True
         self.about_status_var.set(f"正在下载 v{info.version}...")
         self.btn_check_update.configure(state="disabled", text="下载中...")
+        self._show_progress()
         if self.about_progress:
             self.about_progress.stop()
             self.about_progress.configure(mode="determinate")
@@ -411,6 +442,7 @@ class App(ctk.CTk):
                     self.about_progress.stop()
                     self.about_progress.configure(mode="determinate")
                     self.about_progress.set(0)
+                self._hide_progress()
                 self.btn_check_update.configure(state="normal", text="检查更新")
                 self.about_status_var.set("下载更新失败")
                 messagebox.showerror("下载更新", payload, parent=self.about_window)
