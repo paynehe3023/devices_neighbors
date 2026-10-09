@@ -83,6 +83,7 @@ class App(ctk.CTk):
         self.all_data = []
         self.worker = None
         self.about_window = None
+        self.about_progress = None
         self._update_checking = False
         self._update_downloading = False
         self._build_ui()
@@ -230,7 +231,7 @@ class App(ctk.CTk):
         win = ctk.CTkToplevel(self)
         self.about_window = win
         win.title("关于")
-        win.geometry("430x250")
+        win.geometry("430x300")
         win.resizable(False, False)
         # 关于窗口不显示标题栏图标 (用 1x1 透明图覆盖, 否则会带出默认蓝色方块图标)
         self._blank_icon = tk.PhotoImage(width=1, height=1)
@@ -251,7 +252,12 @@ class App(ctk.CTk):
         self.about_status_var = ctk.StringVar(value="可检查 GitHub 仓库中的最新版本")
         ctk.CTkLabel(
             win, textvariable=self.about_status_var, text_color="#9fc5e8"
-        ).pack(pady=(0, 12))
+        ).pack(pady=(0, 8))
+
+        # 下载进度条 (空闲时 0 值, 下载时推进; 总大小未知时切换为循环动画)
+        self.about_progress = ctk.CTkProgressBar(win, width=340, height=10, mode="determinate")
+        self.about_progress.set(0)
+        self.about_progress.pack(pady=(0, 12))
 
         buttons = ctk.CTkFrame(win, fg_color="transparent")
         buttons.pack()
@@ -268,6 +274,7 @@ class App(ctk.CTk):
         if self.about_window and self.about_window.winfo_exists():
             self.about_window.destroy()
         self.about_window = None
+        self.about_progress = None
 
     def _check_updates(self):
         if self._update_checking or self._update_downloading:
@@ -290,6 +297,10 @@ class App(ctk.CTk):
         self._update_downloading = True
         self.about_status_var.set(f"正在下载 v{info.version}...")
         self.btn_check_update.configure(state="disabled", text="下载中...")
+        if self.about_progress:
+            self.about_progress.stop()
+            self.about_progress.configure(mode="determinate")
+            self.about_progress.set(0)
         threading.Thread(
             target=self._worker_download_update, args=(info,), daemon=True
         ).start()
@@ -300,7 +311,7 @@ class App(ctk.CTk):
         def report(received, total):
             nonlocal last_bucket
             percent = int(received * 100 / total) if total else 0
-            bucket = percent // 5
+            bucket = percent // 2          # 每 2% 推一次, 进度条更平滑
             if bucket != last_bucket:
                 last_bucket = bucket
                 self.update_q.put(("download_progress", (received, total, percent)))
@@ -351,16 +362,27 @@ class App(ctk.CTk):
             elif kind == "download_progress":
                 received, total, percent = payload
                 if total:
+                    if self.about_progress:
+                        self.about_progress.stop()
+                        self.about_progress.configure(mode="determinate")
+                        self.about_progress.set(min(received / total, 1.0))
                     self.about_status_var.set(
                         f"正在下载：{percent}%  "
                         f"({received / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB)"
                     )
                 else:
+                    if self.about_progress:
+                        self.about_progress.configure(mode="indeterminate")
+                        self.about_progress.start()
                     self.about_status_var.set(
                         f"正在下载：{received / 1024 / 1024:.1f} MB"
                     )
             elif kind == "download_ok":
                 info, path = payload
+                if self.about_progress:
+                    self.about_progress.stop()
+                    self.about_progress.configure(mode="determinate")
+                    self.about_progress.set(1)
                 self.btn_check_update.configure(state="normal", text="检查更新")
                 self.about_status_var.set(f"v{info.version} 已下载完成")
                 if not updater.can_self_update():
@@ -385,6 +407,10 @@ class App(ctk.CTk):
                     self.about_status_var.set("正在重启并安装更新...")
                     self.after(300, self.destroy)
             elif kind == "download_error":
+                if self.about_progress:
+                    self.about_progress.stop()
+                    self.about_progress.configure(mode="determinate")
+                    self.about_progress.set(0)
                 self.btn_check_update.configure(state="normal", text="检查更新")
                 self.about_status_var.set("下载更新失败")
                 messagebox.showerror("下载更新", payload, parent=self.about_window)
