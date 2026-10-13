@@ -82,6 +82,7 @@ class App(ctk.CTk):
         self.update_q = queue.Queue()
         self.all_data = []
         self.worker = None
+        self.scan_cancel = threading.Event()
         self.about_window = None
         self.about_progress = None
         self.about_buttons = None
@@ -177,17 +178,29 @@ class App(ctk.CTk):
             command=lambda: self._start_scan(True),
         )
         self.btn_all.grid(row=0, column=7, padx=(0, 6), pady=6)
+        self.btn_stop = ctk.CTkButton(
+            f,
+            text="停止扫描",
+            width=78,
+            height=30,
+            state="disabled",
+            fg_color="#8a3030",
+            hover_color="#a43b3b",
+            command=self._stop_scan,
+        )
+        self.btn_stop.grid(row=0, column=8, padx=(0, 6), pady=6)
+        ToolTip(self.btn_stop, "停止当前扫描，并保留已经完成的结果")
 
         # 状态与关于固定在右侧; 关于按钮占固定宽度, 不会被长状态文字挤掉
-        f.grid_columnconfigure(8, weight=1)
+        f.grid_columnconfigure(9, weight=1)
         self.status_var = ctk.StringVar(value="就绪")
         ctk.CTkLabel(
             f, textvariable=self.status_var, text_color="#8f8f8f", anchor="e"
-        ).grid(row=0, column=8, sticky="e", padx=(8, 6), pady=6)
+        ).grid(row=0, column=9, sticky="e", padx=(8, 6), pady=6)
         self.btn_about = ctk.CTkButton(
             f, text="关于", width=60, height=30, command=self._open_about
         )
-        self.btn_about.grid(row=0, column=9, sticky="e", pady=6)
+        self.btn_about.grid(row=0, column=10, sticky="e", pady=6)
         self.update_badge = ctk.CTkLabel(
             self.btn_about,
             text="",
@@ -334,6 +347,15 @@ class App(ctk.CTk):
                     self._fill_tree()
                     self.status_var.set(f"扫描完成: {len(self.all_data)} 台设备")
                     self._set_scan_buttons(True)
+                elif kind == "cancelled":
+                    self.all_data = payload
+                    if self.all_data:
+                        self._fill_tree()
+                    self._log(f"扫描已停止，保留已完成 {len(self.all_data)} 台设备结果")
+                    self.status_var.set(
+                        f"扫描已停止: {len(self.all_data)} 台设备"
+                    )
+                    self._set_scan_buttons(True)
                 elif kind == "error":
                     self._log(f"❌ {payload}")
                     messagebox.showerror("错误", str(payload))
@@ -348,6 +370,10 @@ class App(ctk.CTk):
         state = "normal" if enabled else "disabled"
         self.btn_single.configure(state=state)
         self.btn_all.configure(state=state)
+        self.btn_stop.configure(
+            state="disabled" if enabled else "normal",
+            text="停止扫描",
+        )
 
     # ---------------- 关于 / 更新 ----------------
     def _about_is_open(self):
@@ -618,7 +644,7 @@ class App(ctk.CTk):
     # ---------------- 扫描 ----------------
     def _start_scan(self, recursive):
         if self.worker and self.worker.is_alive():
-            messagebox.showwarning("提示", "扫描进行中, 请等待完成")
+            messagebox.showwarning("提示", "扫描进行中, 请先停止当前扫描")
             return
         ip = self.ip_var.get().strip()
         if not ip:
@@ -630,6 +656,7 @@ class App(ctk.CTk):
         topo.USERNAME = self.user_var.get().strip() or "admin"
         topo.PASSWORD = self.pwd_var.get()
         topo.TARGET_SWITCH = {"host": ip}
+        self.scan_cancel.clear()
         self.status_var.set("扫描中..." + (" (全网递归)" if recursive else " (单台)"))
         self._set_scan_buttons(False)
         self._log(f"开始扫描 {ip} ...")
@@ -640,17 +667,34 @@ class App(ctk.CTk):
         old = sys.stdout
         sys.stdout = QueueWriter(self.q)
         try:
-            data = topo.scan_network(recursive=recursive)
+            data = topo.scan_network(
+                recursive=recursive, cancel_event=self.scan_cancel
+            )
             self.q.put(("done", data))
+        except topo.ScanCancelled as e:
+            self.q.put(("cancelled", e.partial or []))
         except Exception as e:
             self.q.put(("error", f"{type(e).__name__}: {e}"))
         finally:
             sys.stdout = old
 
+    def _stop_scan(self):
+        if not self.worker or not self.worker.is_alive():
+            return
+        if self.scan_cancel.is_set():
+            return
+        self.scan_cancel.set()
+        self.btn_stop.configure(state="disabled", text="停止中...")
+        self.status_var.set("正在停止扫描...")
+        self._log("正在停止扫描...")
+        threading.Thread(
+            target=topo.cancel_active_connections, daemon=True
+        ).start()
+
     # ---------------- 批量 ----------------
     def _batch_scan(self):
         if self.worker and self.worker.is_alive():
-            messagebox.showwarning("提示", "扫描进行中, 请等待完成")
+            messagebox.showwarning("提示", "扫描进行中, 请先停止当前扫描")
             return
         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
         if not path:
@@ -665,6 +709,7 @@ class App(ctk.CTk):
             return
         self.q = queue.Queue()
         self.tree.delete(*self.tree.get_children())
+        self.scan_cancel.clear()
         self.status_var.set(f"批量扫描 {len(rows)} 台...")
         self._set_scan_buttons(False)
         self._log(f"批量扫描 {len(rows)} 台, 文件: {path}")
@@ -675,9 +720,11 @@ class App(ctk.CTk):
     def _worker_batch(self, rows):
         old = sys.stdout
         sys.stdout = QueueWriter(self.q)
+        all_data = []
         try:
-            all_data = []
             for i, row in enumerate(rows, 1):
+                if self.scan_cancel.is_set():
+                    raise topo.ScanCancelled(all_data)
                 ip = (row.get("IP") or "").strip()
                 if not ip:
                     continue
@@ -685,8 +732,14 @@ class App(ctk.CTk):
                 topo.PASSWORD = (row.get("密码") or row.get("password") or "").strip()
                 topo.TARGET_SWITCH = {"host": ip}
                 self.q.put(("log", f"\n[{i}/{len(rows)}] 扫描 {ip} ..."))
-                all_data.extend(topo.scan_network(recursive=False))
+                all_data.extend(
+                    topo.scan_network(
+                        recursive=False, cancel_event=self.scan_cancel
+                    )
+                )
             self.q.put(("done", all_data))
+        except topo.ScanCancelled as e:
+            self.q.put(("cancelled", all_data + (e.partial or [])))
         except Exception as e:
             self.q.put(("error", f"{type(e).__name__}: {e}"))
         finally:

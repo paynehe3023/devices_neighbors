@@ -1,7 +1,7 @@
 {
-  "version": "1.0.6",
+  "version": "1.0.7",
   "download_url": "https://github.com/paynehe3023/devices_neighbors/releases/latest/download/network-topology-scanner.exe",
-  "notes": "v1.0.6：① 优化界面布局，缩小顶部输入框和工具栏占用；② 输入 IP、用户名、密码后可直接按回车执行单台扫描；③ 表格列改为自适应宽度，放大自动铺满、缩小不再遮挡表头；④ 修复状态文字过长时挤压“关于”按钮的问题；⑤ 新增 README 使用说明。",
+  "notes": "v1.0.7：新增“停止扫描”功能，可中断单台、全网及批量扫描并保留已完成结果；停止时会主动断开正在执行的 SSH 会话，无需等待长时间命令超时。",
   "published_at": "2026-10-13",
-  "sha256": "c43cca4f8dbcda697b1868c48d27922890fbfb6a5c296a674f6fac2807822efa"
+  "sha256": "1d4332ef89be08114e8c5eeb56f4bfa45bb5ef1ab2d1419bd51a77d8fad29b4f"
 }

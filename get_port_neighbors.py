@@ -28,11 +28,12 @@ import socket
 import struct
 import sys
 import threading
+import time
 from collections import defaultdict
 from netmiko import ConnectHandler
 
 # ==================== 配置区 ====================
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 # 凭据不落盘: 优先环境变量, 其次由交互模式/GUI/批量CSV在运行时注入
 USERNAME = os.environ.get("TOPO_USERNAME", "admin")
 PASSWORD = os.environ.get("TOPO_PASSWORD", "")
@@ -56,6 +57,14 @@ _CRITICAL_CMDS = {"lldp_verbose", "mac_raw", "arp_raw", "ifbrief"}
 # 已知设备名 -> 真实管理IP (缓存+本次扫描合并), 上联口对端IP优先取此映射
 _KNOWN_IPS = {}
 # ================================================
+
+
+class ScanCancelled(RuntimeError):
+    """用户主动停止扫描; partial 保存已经完成的设备结果。"""
+
+    def __init__(self, partial=None):
+        super().__init__("扫描已停止")
+        self.partial = list(partial or [])
 
 try:
     from manuf import manuf as _manuf
@@ -391,12 +400,13 @@ def _dns_name(ip):
     return ""
 
 
-def enrich_hostnames(data):
+def enrich_hostnames(data, cancel_event=None):
     """对终端口并发探测主机名 (DNS PTR -> NetBIOS -> mDNS), 存 data['hostnames']={ip:name};
     网络关闭/无响应时静默跳过, 不影响其余功能。"""
     data["hostnames"] = {}
     if not PROBE_HOSTNAME:
         return data
+    _check_cancel(cancel_event)
     targets = set()
     for port, macs in data["macs"].items():
         if len(macs) <= TERMINAL_MAC_LIMIT:      # 终端特征: 少量MAC
@@ -408,6 +418,8 @@ def enrich_hostnames(data):
         return data
 
     def _probe(ip):
+        if cancel_event is not None and cancel_event.is_set():
+            return ""
         return _dns_name(ip) or _netbios_name(ip) or _mdns_name(ip)
 
     # 注意: 不能用 with ThreadPoolExecutor(...), 其 __exit__ 会 join 所有任务,
@@ -415,15 +427,27 @@ def enrich_hostnames(data):
     ex = _cf.ThreadPoolExecutor(max_workers=24)
     try:
         futs = {ex.submit(_probe, ip): ip for ip in sorted(targets)}
-        done, _pending = _cf.wait(futs, timeout=12)     # 全部探测总预算12s
-        for f in done:
-            ip = futs[f]
-            try:
-                name = f.result()
-            except Exception:
-                name = ""
-            if name:
-                data["hostnames"][ip] = name
+        pending = set(futs)
+        deadline = time.monotonic() + 12          # 全部探测总预算12s
+        while pending:
+            _check_cancel(cancel_event)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = _cf.wait(
+                pending,
+                timeout=min(0.25, remaining),
+                return_when=_cf.FIRST_COMPLETED,
+            )
+            for f in done:
+                _check_cancel(cancel_event)
+                ip = futs[f]
+                try:
+                    name = f.result()
+                except Exception:
+                    name = ""
+                if name:
+                    data["hostnames"][ip] = name
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
     if data["hostnames"]:
@@ -434,33 +458,81 @@ def enrich_hostnames(data):
     return data
 
 
-def _connect(host):
+_ACTIVE_CONNECTIONS = set()
+_ACTIVE_CONNECTIONS_LOCK = threading.Lock()
+
+
+def _check_cancel(cancel_event, partial=None):
+    if cancel_event is not None and cancel_event.is_set():
+        raise ScanCancelled(partial)
+
+
+def _register_connection(conn):
+    with _ACTIVE_CONNECTIONS_LOCK:
+        _ACTIVE_CONNECTIONS.add(conn)
+
+
+def _close_connection(conn):
+    with _ACTIVE_CONNECTIONS_LOCK:
+        _ACTIVE_CONNECTIONS.discard(conn)
+    try:
+        conn.disconnect()
+    except Exception:
+        pass
+
+
+def cancel_active_connections():
+    """关闭正在执行的 SSH 会话, 让阻塞中的 Netmiko 命令尽快返回。"""
+    with _ACTIVE_CONNECTIONS_LOCK:
+        connections = list(_ACTIVE_CONNECTIONS)
+    for conn in connections:
+        _close_connection(conn)
+
+
+def _connect(host, cancel_event=None):
     """建立华为设备 SSH 连接(统一超时参数)"""
+    _check_cancel(cancel_event)
     if not PASSWORD:
         raise RuntimeError("未提供交换机密码: 请设置环境变量 TOPO_PASSWORD, 或改用交互模式/GUI 输入")
-    return ConnectHandler(device_type="huawei", host=host, username=USERNAME, password=PASSWORD,
-                          conn_timeout=CONN_TIMEOUT, auth_timeout=CONN_TIMEOUT,
-                          banner_timeout=CONN_TIMEOUT, system_host_keys=False)
+    conn = ConnectHandler(
+        device_type="huawei",
+        host=host,
+        username=USERNAME,
+        password=PASSWORD,
+        conn_timeout=CONN_TIMEOUT,
+        auth_timeout=CONN_TIMEOUT,
+        banner_timeout=CONN_TIMEOUT,
+        system_host_keys=False,
+    )
+    try:
+        _check_cancel(cancel_event)
+    except ScanCancelled:
+        _close_connection(conn)
+        raise
+    _register_connection(conn)
+    return conn
 
 
 _ARP_CACHE = {}                          # host -> {mac: ip}, 并发扫描时同一来源只拉一次
 _ARP_LOCK = threading.Lock()
 
 
-def _fetch_source_arp(host):
+def _fetch_source_arp(host, cancel_event=None):
+    _check_cancel(cancel_event)
     if host not in _ARP_CACHE:
         with _ARP_LOCK:
+            _check_cancel(cancel_event)
             if host not in _ARP_CACHE:
-                c = _connect(host)
+                c = _connect(host, cancel_event)
                 try:
                     raw = c.send_command("display arp", read_timeout=120)
                 finally:
-                    c.disconnect()
+                    _close_connection(c)
                 _ARP_CACHE[host] = parse_arp(raw)
     return _ARP_CACHE[host]
 
 
-def enrich_arp_from_sources(data):
+def enrich_arp_from_sources(data, cancel_event=None):
     """借用网关/核心的 ARP 表补全本机 MAC->IP 视角。
     只拉取 display arp 一张表(不递归扫描其他数据); 本机 ARP 优先级最高, 缺失的用网关补。"""
     sources = list(ARP_SOURCES)
@@ -472,11 +544,14 @@ def enrich_arp_from_sources(data):
                 break   # 只借第一台上联设备, 保持轻量
     merged = {}
     for s in sources:
+        _check_cancel(cancel_event)
         host, name = s["host"], s.get("name", "")
         try:
-            arp = _fetch_source_arp(host)
+            arp = _fetch_source_arp(host, cancel_event)
             merged.update(arp)
             print(f"  📖 借用 {name or host} ARP 表: +{len(arp)} 条")
+        except ScanCancelled:
+            raise
         except Exception as e:
             print(f"  ⚠ 借用 ARP 失败 {host}: {type(e).__name__}: {str(e)[:70]}")
     if merged:
@@ -487,10 +562,11 @@ def enrich_arp_from_sources(data):
     return data
 
 
-def scan_switch(host, name_hint=""):
+def scan_switch(host, name_hint="", cancel_event=None):
     """单台交换机全量采集 (全部只读命令)"""
-    conn = _connect(host)
+    conn = _connect(host, cancel_event)
     try:
+        _check_cancel(cancel_event)
         prompt = conn.find_prompt()
         # 设备名以设备实际 sysname 为准 (display sysname 在部分 VRP 非法, 用 include 方式)
         name = ""
@@ -516,9 +592,14 @@ def scan_switch(host, name_hint=""):
         ]
         out, cmd_errors = {}, []
         for key, cmd, tout in cmds:
+            _check_cancel(cancel_event)
             try:
                 out[key] = conn.send_command(cmd, read_timeout=tout) or ""
+            except ScanCancelled:
+                raise
             except Exception as e:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ScanCancelled()
                 print(f"    ⚠ {name} 命令失败 {cmd}: {e}")
                 out[key] = ""
                 cmd_errors.append(f"{cmd}({type(e).__name__})")
@@ -539,7 +620,7 @@ def scan_switch(host, name_hint=""):
             "cmd_errors": cmd_errors,
         }
     finally:
-        conn.disconnect()
+        _close_connection(conn)
 
 
 def merge_brief(data):
@@ -554,13 +635,17 @@ def merge_brief(data):
             }
 
 
-def scan_network(recursive=False):
+def scan_network(recursive=False, cancel_event=None):
     """默认单机模式: 仅扫描 TARGET_SWITCH 一台; --recursive 时并发递归发现全网。
     并发: MAX_WORKERS 个SSH worker; ARP来源表经 _ARP_CACHE 只拉一次; MAX_SCAN 防失控。"""
+    if cancel_event is None:
+        cancel_event = threading.Event()
+    _check_cancel(cancel_event)
     seen, all_data = set(), []
     lock = threading.Lock()
 
     def _submit(host):
+        _check_cancel(cancel_event, all_data)
         with lock:
             if host in seen or len(seen) >= MAX_SCAN:
                 return False
@@ -569,9 +654,10 @@ def scan_network(recursive=False):
         return True
 
     def _postprocess(d):
+        _check_cancel(cancel_event, all_data)
         merge_brief(d)
-        enrich_arp_from_sources(d)   # 借用网关/核心 ARP 补全下联设备 IP
-        enrich_hostnames(d)          # 终端口主机名探测(DNS PTR/NetBIOS/mDNS)
+        enrich_arp_from_sources(d, cancel_event)   # 借用网关/核心 ARP 补全下联设备 IP
+        enrich_hostnames(d, cancel_event)          # 终端口主机名探测(DNS PTR/NetBIOS/mDNS)
         n_lldp = len([p for p, r in d["lldp_verbose"].items() if r.get("remote_dev")])
         print(f"  ✓ {d['name']} ({d['host']}) | LLDP邻居 {n_lldp} 口 | 有MAC端口 {len(d['macs'])} | 接口 {len(d['ifbrief'])}")
         errs = d.get("cmd_errors") or []
@@ -579,14 +665,25 @@ def scan_network(recursive=False):
             print(f"    ⚠ {d['name']} 采集异常 {len(errs)} 项, 报表数据可能不完整: " + "; ".join(errs))
 
     _submit(TARGET_SWITCH["host"])
-    with _cf.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        pending = {ex.submit(scan_switch, h, ""): h for h in list(seen)}
+    ex = _cf.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    try:
+        pending = {
+            ex.submit(scan_switch, h, "", cancel_event): h for h in list(seen)
+        }
         while pending:
-            done, _ = _cf.wait(pending, return_when=_cf.FIRST_COMPLETED)
+            _check_cancel(cancel_event, all_data)
+            done, _ = _cf.wait(
+                pending, timeout=0.25, return_when=_cf.FIRST_COMPLETED
+            )
+            if not done:
+                continue
             for f in done:
                 host = pending.pop(f)
                 try:
                     d = f.result()
+                except ScanCancelled:
+                    cancel_active_connections()
+                    raise ScanCancelled(all_data)
                 except Exception as e:
                     print(f"  ⚠ {host} 扫描失败, 跳过: {type(e).__name__}: {str(e)[:120]}")
                     continue
@@ -604,7 +701,12 @@ def scan_network(recursive=False):
                         if gw and nrole > myrole:   # 上联设备: LLDP自报地址常为不可达管理口, 用网关IP入队
                             ip = gw
                         if _submit(ip):
-                            pending[ex.submit(scan_switch, ip, "")] = ip
+                            pending[ex.submit(scan_switch, ip, "", cancel_event)] = ip
+    except ScanCancelled as e:
+        cancel_active_connections()
+        raise ScanCancelled(e.partial or all_data) from None
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return all_data
 
 

@@ -2,7 +2,7 @@
 
 基于 SSH / Netmiko 的交换机端口拓扑探测与终端资产盘点工具，提供 CustomTkinter 图形界面和命令行两种使用方式。
 
-当前版本：`v1.0.6`
+当前版本：`v1.0.7`
 
 ## 功能
 
@@ -11,7 +11,7 @@
 - 全网递归：默认只扫描指定交换机，开启递归后自动发现并扫描邻居交换机。
 - 端口查询：按交换机端口查看上下联链路，或按 IP 反查设备所在交换机和物理端口。
 - 报表导出：生成端口拓扑、MAC 明细和链路关系 CSV。
-- 图形界面：支持单台扫描、全网扫描、CSV 批量扫描、回车快捷扫描和在线更新检查。
+- 图形界面：支持单台扫描、全网扫描、CSV 批量扫描、回车快捷扫描、随时停止扫描和在线更新检查。
 
 ## 环境要求
 
@@ -43,8 +43,9 @@ pip install netmiko textfsm manuf customtkinter pyinstaller
 1. 输入交换机 IP、用户名和密码。
 2. 按回车或点击“单台扫描”。
 3. 点击“全网扫描”递归发现邻居交换机。
-4. 使用“按 IP 反查”或“按端口查询”定位链路。
-5. 点击“导出 CSV 报表”导出当前结果。
+4. 扫描过程中可点击“停止扫描”；已经完成的设备结果会保留。
+5. 使用“按 IP 反查”或“按端口查询”定位链路。
+6. 点击“导出 CSV 报表”导出当前结果。
 
 “关于”窗口可以手动检查更新。程序启动后也会静默检查 `version.json`，发现新版本时会在“关于”按钮左上角显示红点。
 
@@ -91,7 +92,7 @@ $env:TOPO_PASSWORD = "your-password"
 
 ```json
 {
-  "version": "1.0.6",
+  "version": "1.0.7",
   "download_url": "https://github.com/paynehe3023/devices_neighbors/releases/latest/download/network-topology-scanner.exe",
   "notes": "更新说明",
   "published_at": "2026-10-13",
