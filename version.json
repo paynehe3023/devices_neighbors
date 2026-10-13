@@ -1,7 +1,7 @@
 {
   "version": "1.0.8",
   "download_url": "https://github.com/paynehe3023/devices_neighbors/releases/latest/download/network-topology-scanner.exe",
-  "notes": "v1.0.8：修复自动更新安装时火绒提示父进程路径获取失败的问题；更新流程不再通过 cmd.exe 中转，改由程序自身的独立更新助手完成替换与重启。",
+  "notes": "v1.0.8：修复自动更新安装时火绒提示父进程路径获取失败的问题；更新流程不再通过 cmd.exe 中转，改由程序自身的独立更新助手完成替换与重启。由于 v1.0.7 仍使用旧更新器，首次请手动下载 v1.0.8 覆盖安装，后续自动更新即可生效。",
   "published_at": "2026-10-13",
   "sha256": "c52aaa6b12e76cb6befe5680fddbe6b40dcc6e4cb267806091f2729e4801ee98"
 }
