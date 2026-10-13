@@ -2,7 +2,7 @@
 
 基于 SSH / Netmiko 的交换机端口拓扑探测与终端资产盘点工具，提供 CustomTkinter 图形界面和命令行两种使用方式。
 
-当前版本：`v1.0.7`
+当前版本：`v1.0.8`
 
 ## 功能
 
@@ -92,7 +92,7 @@ $env:TOPO_PASSWORD = "your-password"
 
 ```json
 {
-  "version": "1.0.7",
+  "version": "1.0.8",
   "download_url": "https://github.com/paynehe3023/devices_neighbors/releases/latest/download/network-topology-scanner.exe",
   "notes": "更新说明",
   "published_at": "2026-10-13",
@@ -107,6 +107,8 @@ $env:TOPO_PASSWORD = "your-password"
 3. 重新打包并计算 exe 的 SHA256，写回 `version.json`。
 4. 将 `version.json` 推送到 GitHub `main` 分支。
 5. 在 GitHub Release 上传 exe，附件名必须为 `network-topology-scanner.exe`。
+
+`v1.0.8` 起，自动更新不再通过 `cmd.exe` 执行替换脚本，而是复制当前程序作为独立更新助手。助手等待旧进程退出后替换 EXE 并直接重启，避免安全软件因父进程已退出而拦截更新。
 
 ## 打包
 

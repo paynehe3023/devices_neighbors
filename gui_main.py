@@ -861,4 +861,6 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
+    if updater.run_update_helper(sys.argv):
+        sys.exit(0)
     App().mainloop()

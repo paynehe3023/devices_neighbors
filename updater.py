@@ -7,9 +7,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -24,6 +26,8 @@ RELEASE_API_URL = f"https://api.github.com/repos/{REPO_FULL_NAME}/releases/lates
 USER_AGENT = "devices-neighbors-updater"
 HTTP_TIMEOUT = 15
 CHUNK_SIZE = 256 * 1024
+APPLY_UPDATE_FLAG = "--apply-update"
+HELPER_EXIT_DELAY_SECONDS = 5.0
 
 
 class UpdateError(RuntimeError):
@@ -247,8 +251,121 @@ def _check_target_writable(target: Path) -> None:
         raise UpdateError(f"程序目录不可写，请用管理员权限运行后再更新: {exc}") from exc
 
 
+def _creation_flags() -> int:
+    if os.name != "nt":
+        return 0
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _wait_for_process_exit(pid: int, timeout: float = 60.0) -> None:
+    """等待旧程序退出。使用 Win32 句柄，避免误伤或依赖 tasklist。"""
+    if os.name != "nt" or pid <= 0:
+        return
+
+    import ctypes
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return
+    try:
+        result = kernel32.WaitForSingleObject(handle, int(timeout * 1000))
+        if result == wait_timeout:
+            raise UpdateError("等待旧程序退出超时，请关闭程序后手动运行新版本")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _replace_after_exit(new_exe: Path, target: Path, parent_pid: int) -> None:
+    """先把新文件暂存在目标目录，再在旧进程退出后原子替换。"""
+    staged = target.with_name(f".{target.name}.update-{os.getpid()}.tmp")
+    try:
+        shutil.copy2(new_exe, staged)
+        _wait_for_process_exit(parent_pid)
+        deadline = time.monotonic() + 60
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                os.replace(staged, target)
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.5)
+        raise UpdateError(f"替换程序文件失败: {last_error}")
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def apply_update(
+    new_exe: Path,
+    target: Path,
+    parent_pid: int,
+    *,
+    restart: bool = True,
+) -> None:
+    """更新助手入口：等待旧进程退出、替换 EXE 并直接启动新版。"""
+    new_exe = Path(new_exe).resolve()
+    target = Path(target).resolve()
+    if not new_exe.is_file():
+        raise UpdateError("更新文件不存在，请重新下载")
+    if new_exe == target:
+        raise UpdateError("更新文件与当前程序路径相同")
+    if not target.is_file():
+        raise UpdateError(f"当前程序路径不存在: {target}")
+
+    _replace_after_exit(new_exe, target, parent_pid)
+    if restart:
+        subprocess.Popen(
+            [str(target)],
+            cwd=str(target.parent),
+            close_fds=True,
+            creationflags=_creation_flags(),
+        )
+        # 保持助手存活片刻，确保安全软件能解析新程序的父进程路径。
+        time.sleep(HELPER_EXIT_DELAY_SECONDS)
+
+
+def _show_helper_error(message: str) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            None, message, "更新安装失败", 0x00000010
+        )
+    except Exception:
+        pass
+
+
+def run_update_helper(argv: list[str]) -> bool:
+    """在复制的当前 EXE 中执行更新；返回 True 表示本次是更新助手。"""
+    if len(argv) < 2 or argv[1] != APPLY_UPDATE_FLAG:
+        return False
+    try:
+        if len(argv) != 5:
+            raise UpdateError("更新助手参数无效")
+        apply_update(Path(argv[2]), Path(argv[3]), int(argv[4]))
+    except Exception as exc:
+        try:
+            log = _update_dir() / "update_error.log"
+            log.write_text(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n{exc}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        _show_helper_error(str(exc))
+    return True
+
+
 def launch_updater(downloaded_exe: Path) -> Path:
-    """启动独立脚本，等待当前进程退出后替换 exe 并重启。"""
+    """复制当前 EXE 作为更新助手，避免 cmd.exe 导致安全软件父进程校验失败。"""
     if not can_self_update():
         raise UpdateError("开发模式下不会自动替换程序，请手动运行下载的新版本")
 
@@ -260,58 +377,33 @@ def launch_updater(downloaded_exe: Path) -> Path:
         raise UpdateError("更新文件与当前程序路径相同")
     _check_target_writable(target)
 
-    script = new_exe.parent / "apply_update.cmd"
-    script.write_text(
-        "\n".join(
-            [
-                "@echo off",
-                "setlocal EnableExtensions",
-                'set "NEW=%~1"',
-                'set "TARGET=%~2"',
-                'set "PID=%~3"',
-                "set /a tries=0",
-                ":wait",
-                'tasklist /FI "PID eq %PID%" /NH 2>nul | find "%PID%" >nul',
-                "if not errorlevel 1 (",
-                "  ping -n 2 127.0.0.1 >nul",
-                "  goto wait",
-                ")",
-                ":replace",
-                'move /Y "%NEW%" "%TARGET%" >nul 2>&1',
-                "if not errorlevel 1 goto restart",
-                "set /a tries+=1",
-                "if %tries% GEQ 30 goto restart",
-                "ping -n 2 127.0.0.1 >nul",
-                "goto replace",
-                ":restart",
-                'start "" /D "%~dp2" "%TARGET%"',
-                'del "%~f0" >nul 2>&1',
-            ]
-        )
-        + "\n",
-        encoding="ascii",
-    )
-
-    # 只用 CREATE_NO_WINDOW (隐藏控制台)。切勿加 DETACHED_PROCESS(0x8):
-    # 那会让 cmd.exe 失去控制台, 脚本中的管道/find/ping 会失效, 整个替换流程静默失败,
-    # 表现为"点安装后没有新版"。实测: 带 0x8 时脚本 0.2s 直接退出且未替换文件。
-    flags = 0
-    if os.name == "nt":
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    update_dir = _update_dir()
+    for stale in update_dir.glob("network-topology-scanner-updater-*.exe"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     try:
+        (update_dir / "apply_update.cmd").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    helper = update_dir / f"network-topology-scanner-updater-{os.getpid()}.exe"
+    try:
+        helper.unlink(missing_ok=True)
+        shutil.copy2(target, helper)
         subprocess.Popen(
             [
-                "cmd.exe",
-                "/d",
-                "/c",
-                str(script),
+                str(helper),
+                APPLY_UPDATE_FLAG,
                 str(new_exe),
                 str(target),
                 str(os.getpid()),
             ],
+            cwd=str(helper.parent),
             close_fds=True,
-            creationflags=flags,
+            creationflags=_creation_flags(),
         )
     except OSError as exc:
         raise UpdateError(f"无法启动更新程序: {exc}") from exc
-    return script
+    return helper
