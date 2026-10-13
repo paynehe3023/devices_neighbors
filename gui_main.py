@@ -85,10 +85,15 @@ class App(ctk.CTk):
         self.about_window = None
         self.about_progress = None
         self.about_buttons = None
+        self.about_status_var = None
         self._update_checking = False
         self._update_downloading = False
+        self._available_update = None
+        self.update_badge = None
+        self.btn_about = None
         self._build_ui()
         self.after(120, self._poll)
+        self.after(800, lambda: self._check_updates(silent=True))
 
     def _set_taskbar_identity(self):
         if sys.platform != "win32":
@@ -118,64 +123,184 @@ class App(ctk.CTk):
 
     # ---------------- UI ----------------
     def _build_ui(self):
-        f = ctk.CTkFrame(self)
-        f.pack(fill="x", padx=10, pady=(10, 4))
-        ctk.CTkLabel(f, text="交换机IP:").grid(row=0, column=0, padx=4, pady=6)
+        # 连接信息行: 固定宽度, 避免输入框随窗口拉成长条
+        f = ctk.CTkFrame(self, fg_color="transparent")
+        f.pack(fill="x", padx=12, pady=(10, 2))
+        ctk.CTkLabel(f, text="交换机 IP:", text_color="#c8c8c8").grid(
+            row=0, column=0, padx=(0, 6), pady=6, sticky="w"
+        )
         self.ip_var = ctk.StringVar(value="")
-        ctk.CTkEntry(f, width=150, placeholder_text="如 10.175.10.41", textvariable=self.ip_var).grid(row=0, column=1, padx=4)
-        ctk.CTkLabel(f, text="用户名:").grid(row=0, column=2, padx=4)
+        self.ip_entry = ctk.CTkEntry(
+            f,
+            width=140,
+            height=30,
+            placeholder_text="如 10.175.10.41",
+            textvariable=self.ip_var,
+        )
+        self.ip_entry.grid(row=0, column=1, padx=(0, 12), pady=6, sticky="w")
+        ctk.CTkLabel(f, text="用户名:", text_color="#c8c8c8").grid(
+            row=0, column=2, padx=(0, 6), pady=6, sticky="w"
+        )
         self.user_var = ctk.StringVar(value="")
-        ctk.CTkEntry(f, width=100, placeholder_text="admin", textvariable=self.user_var).grid(row=0, column=3, padx=4)
-        ctk.CTkLabel(f, text="密码:").grid(row=0, column=4, padx=4)
+        self.user_entry = ctk.CTkEntry(
+            f,
+            width=90,
+            height=30,
+            placeholder_text="admin",
+            textvariable=self.user_var,
+        )
+        self.user_entry.grid(row=0, column=3, padx=(0, 12), pady=6, sticky="w")
+        ctk.CTkLabel(f, text="密码:", text_color="#c8c8c8").grid(
+            row=0, column=4, padx=(0, 6), pady=6, sticky="w"
+        )
         self.pwd_var = ctk.StringVar(value="")
-        ctk.CTkEntry(f, width=120, textvariable=self.pwd_var, show="*").grid(row=0, column=5, padx=4)
-        self.btn_single = ctk.CTkButton(f, text="单台扫描", width=90, command=lambda: self._start_scan(False))
-        self.btn_single.grid(row=0, column=6, padx=4)
-        self.btn_all = ctk.CTkButton(f, text="全网扫描", width=90, fg_color="#2f6f4f", command=lambda: self._start_scan(True))
-        self.btn_all.grid(row=0, column=7, padx=4)
-        ctk.CTkButton(f, text="导出模板", width=90, command=self._export_template).grid(row=0, column=8, padx=4)
-        ctk.CTkButton(f, text="选择CSV批量", width=110, command=self._batch_scan).grid(row=0, column=9, padx=4)
+        self.pwd_entry = ctk.CTkEntry(
+            f, width=105, height=30, textvariable=self.pwd_var, show="*"
+        )
+        self.pwd_entry.grid(row=0, column=5, padx=(0, 12), pady=6, sticky="w")
 
-        qf = ctk.CTkFrame(self)
-        qf.pack(fill="x", padx=10, pady=4)
+        self.btn_single = ctk.CTkButton(
+            f,
+            text="单台扫描",
+            width=78,
+            height=30,
+            command=lambda: self._start_scan(False),
+        )
+        self.btn_single.grid(row=0, column=6, padx=(0, 6), pady=6)
+        self.btn_all = ctk.CTkButton(
+            f,
+            text="全网扫描",
+            width=78,
+            height=30,
+            fg_color="#2f6f4f",
+            hover_color="#3b8661",
+            command=lambda: self._start_scan(True),
+        )
+        self.btn_all.grid(row=0, column=7, padx=(0, 6), pady=6)
+
+        # 状态与关于固定在右侧; 关于按钮占固定宽度, 不会被长状态文字挤掉
+        f.grid_columnconfigure(8, weight=1)
+        self.status_var = ctk.StringVar(value="就绪")
+        ctk.CTkLabel(
+            f, textvariable=self.status_var, text_color="#8f8f8f", anchor="e"
+        ).grid(row=0, column=8, sticky="e", padx=(8, 6), pady=6)
+        self.btn_about = ctk.CTkButton(
+            f, text="关于", width=60, height=30, command=self._open_about
+        )
+        self.btn_about.grid(row=0, column=9, sticky="e", pady=6)
+        self.update_badge = ctk.CTkLabel(
+            self.btn_about,
+            text="",
+            width=10,
+            height=10,
+            corner_radius=5,
+            fg_color="#ff3b30",
+            cursor="hand2",
+        )
+        self.update_badge.bind("<Button-1>", lambda _event: self._open_about())
+        self.update_badge.place_forget()
+        ToolTip(self.update_badge, "发现新版本")
+
+        # 常用操作区: 工具与查询同排, 减少纵向占用
+        tools = ctk.CTkFrame(self, fg_color="transparent")
+        tools.pack(fill="x", padx=12, pady=(2, 4))
+        ctk.CTkButton(
+            tools, text="导出模板", width=82, height=30, command=self._export_template
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            tools, text="选择 CSV 批量", width=110, height=30, command=self._batch_scan
+        ).pack(side="left", padx=(0, 12))
         self.qip_var = ctk.StringVar()
-        ctk.CTkEntry(qf, width=140, placeholder_text="按IP反查", textvariable=self.qip_var).pack(side="left", padx=4)
-        ctk.CTkButton(qf, text="反查", width=60, command=self._query_ip).pack(side="left", padx=4)
-        q1 = ctk.CTkLabel(qf, text=" ? ", text_color="#4a90d9", cursor="question_arrow")
+        self.qip_entry = ctk.CTkEntry(
+            tools,
+            width=130,
+            height=30,
+            placeholder_text="按 IP 反查",
+            textvariable=self.qip_var,
+        )
+        self.qip_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkButton(
+            tools, text="反查", width=56, height=30, command=self._query_ip
+        ).pack(side="left", padx=(0, 2))
+        q1 = ctk.CTkLabel(tools, text=" ? ", text_color="#4a90d9", cursor="question_arrow")
         q1.pack(side="left", padx=(0, 10))
         ToolTip(q1, "反查: 输入设备IP, 查出它插在哪台交换机的哪个物理端口\n例如 10.175.200.240 → YFL-ZXJF-JK-no.1 的 GE0/0/2\n需先扫描过且有数据")
         self.qport_var = ctk.StringVar()
-        ctk.CTkEntry(qf, width=140, placeholder_text="按端口查询(如GE0/0/49)", textvariable=self.qport_var).pack(side="left", padx=4)
-        ctk.CTkButton(qf, text="查询", width=60, command=self._query_port).pack(side="left", padx=4)
-        q2 = ctk.CTkLabel(qf, text=" ? ", text_color="#4a90d9", cursor="question_arrow")
+        self.qport_entry = ctk.CTkEntry(
+            tools,
+            width=150,
+            height=30,
+            placeholder_text="按端口查询(如GE0/0/49)",
+            textvariable=self.qport_var,
+        )
+        self.qport_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkButton(
+            tools, text="查询", width=56, height=30, command=self._query_port
+        ).pack(side="left", padx=(0, 2))
+        q2 = ctk.CTkLabel(tools, text=" ? ", text_color="#4a90d9", cursor="question_arrow")
         q2.pack(side="left", padx=(0, 10))
         ToolTip(q2, "查询: 输入交换机端口, 查看该端口的上下联链路与对端详情\n例如 GE0/0/49 → 上联 CoreSW-INTERNET-01 XGE1/0/2")
-        ctk.CTkButton(qf, text="导出CSV报表", width=110, command=self._export).pack(side="left", padx=4)
-        self.status_var = ctk.StringVar(value="就绪")
-        ctk.CTkLabel(qf, textvariable=self.status_var, text_color="gray").pack(side="right", padx=6)
-        ctk.CTkButton(qf, text="关于", width=60, command=self._open_about).pack(side="right", padx=4)
+        ctk.CTkButton(
+            tools, text="导出 CSV 报表", width=110, height=30, command=self._export
+        ).pack(side="left")
 
-        self.log_box = ctk.CTkTextbox(self, height=120, font=("Consolas", 13))
-        self.log_box.pack(fill="x", padx=10, pady=4)
+        # 输入完成后可直接回车执行单台扫描
+        for entry in (self.ip_entry, self.user_entry, self.pwd_entry):
+            entry.bind("<Return>", lambda _event: self._start_scan(False))
+            entry.bind("<KP_Enter>", lambda _event: self._start_scan(False))
 
-        tf = ctk.CTkFrame(self)
-        tf.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        self.log_box = ctk.CTkTextbox(
+            self, height=110, font=("Consolas", 12), corner_radius=6
+        )
+        self.log_box.pack(fill="x", padx=12, pady=(4, 2))
+
+        tf = ctk.CTkFrame(self, fg_color="transparent")
+        tf.pack(fill="both", expand=True, padx=12, pady=(2, 10))
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("Treeview", background="#2b2b2b", fieldbackground="#2b2b2b",
-                        foreground="#e8e8e8", rowheight=22)
-        style.configure("Treeview.Heading", background="#1f1f1f", foreground="#e8e8e8")
+        style.configure(
+            "Treeview",
+            background="#202020",
+            fieldbackground="#202020",
+            foreground="#e8e8e8",
+            rowheight=24,
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background="#2c2c2c",
+            foreground="#f0f0f0",
+            relief="flat",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padding=4,
+        )
+        style.map("Treeview", background=[("selected", "#315d8a")])
         self.tree = ttk.Treeview(tf, columns=TREE_COLS, show="headings", height=12)
         for c in TREE_COLS:
-            self.tree.heading(c, text=c)
-        widths = {"端口": 80, "状态": 50, "方向": 70, "对端设备": 150, "对端端口": 100,
-                  "对端IP": 120, "对端MAC": 120, "终端识别": 160, "主机名": 120}
+            self.tree.heading(c, text=c, anchor="center")
+        widths = {
+            "端口": 72,
+            "状态": 56,
+            "方向": 62,
+            "对端设备": 120,
+            "对端端口": 96,
+            "对端IP": 108,
+            "对端MAC": 118,
+            "终端识别": 120,
+            "主机名": 100,
+        }
         for c in TREE_COLS:
-            self.tree.column(c, width=widths.get(c, 100), minwidth=40, stretch=True, anchor="w")
+            self.tree.column(
+                c,
+                width=widths.get(c, 100),
+                minwidth=widths.get(c, 100),
+                stretch=True,
+                anchor="w",
+            )
         vsb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tf, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        # grid 布局: 表格随窗口自适应拉伸, 滚动条贴边 (窄窗口下可横向滚动, 不再裁切表头)
+        # 表格列在窗口内自动分配宽度; 缩到最小宽度以下时由横向滚动条承接
         tf.grid_rowconfigure(0, weight=1)
         tf.grid_columnconfigure(0, weight=1)
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -191,6 +316,7 @@ class App(ctk.CTk):
         self._menu_cell = None
         self._menu_col = None
         self.tree.bind("<Button-3>", self._tree_menu_popup)
+        self.after(100, self.ip_entry.focus_set)
 
     # ---------------- 日志 / 轮询 ----------------
     def _log(self, msg):
@@ -224,8 +350,20 @@ class App(ctk.CTk):
         self.btn_all.configure(state=state)
 
     # ---------------- 关于 / 更新 ----------------
+    def _about_is_open(self):
+        return bool(self.about_window and self.about_window.winfo_exists())
+
+    def _set_update_badge(self, visible):
+        if not self.update_badge:
+            return
+        if visible:
+            self.update_badge.place(x=0, y=0, anchor="nw")
+            self.update_badge.lift()
+        else:
+            self.update_badge.place_forget()
+
     def _open_about(self):
-        if self.about_window and self.about_window.winfo_exists():
+        if self._about_is_open():
             self.about_window.lift()
             return
 
@@ -256,7 +394,15 @@ class App(ctk.CTk):
             justify="center",
             text_color="#c8c8c8",
         ).pack(pady=(0, 14))
-        self.about_status_var = ctk.StringVar(value="可检查 GitHub 仓库中的最新版本")
+        if self._available_update:
+            about_status = f"发现新版本 v{self._available_update.version}"
+        elif self._update_checking:
+            about_status = "正在后台检查更新..."
+        elif self._update_downloading:
+            about_status = "正在下载更新..."
+        else:
+            about_status = "可检查 GitHub 仓库中的最新版本"
+        self.about_status_var = ctk.StringVar(value=about_status)
         ctk.CTkLabel(
             win, textvariable=self.about_status_var, text_color="#9fc5e8"
         ).pack(pady=(0, 12))
@@ -269,8 +415,15 @@ class App(ctk.CTk):
         self.about_buttons.pack()
         buttons = self.about_buttons
         self.btn_check_update = ctk.CTkButton(
-            buttons, text="检查更新", width=110, command=self._check_updates
+            buttons,
+            text="检查更新",
+            width=110,
+            command=lambda: self._check_updates(silent=False),
         )
+        if self._update_checking:
+            self.btn_check_update.configure(state="disabled", text="检查中...")
+        elif self._update_downloading:
+            self.btn_check_update.configure(state="disabled", text="下载中...")
         self.btn_check_update.pack(side="left", padx=5)
         ctk.CTkButton(
             buttons, text="关闭", width=90, fg_color="#555555",
@@ -306,20 +459,23 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-    def _check_updates(self):
+    def _check_updates(self, silent=False):
         if self._update_checking or self._update_downloading:
             return
         self._update_checking = True
-        self.about_status_var.set("正在检查更新...")
-        self.btn_check_update.configure(state="disabled", text="检查中...")
-        threading.Thread(target=self._worker_check_update, daemon=True).start()
+        if self._about_is_open():
+            self.about_status_var.set("正在检查更新...")
+            self.btn_check_update.configure(state="disabled", text="检查中...")
+        threading.Thread(
+            target=self._worker_check_update, args=(silent,), daemon=True
+        ).start()
 
-    def _worker_check_update(self):
+    def _worker_check_update(self, silent):
         try:
             info = updater.check_for_update(topo.APP_VERSION)
-            self.update_q.put(("check_ok", info))
+            self.update_q.put(("check_ok", (info, silent)))
         except Exception as exc:
-            self.update_q.put(("check_error", str(exc)))
+            self.update_q.put(("check_error", (str(exc), silent)))
 
     def _start_update_download(self, info):
         if self._update_downloading:
@@ -363,33 +519,45 @@ class App(ctk.CTk):
                 kind, payload = self.update_q.get_nowait()
             except queue.Empty:
                 return
-            if kind in ("check_ok", "check_error"):
+            if kind == "check_ok":
+                info, silent = payload
+                self._update_checking = False
+                self._available_update = info
+                self._set_update_badge(info is not None)
+            elif kind == "check_error":
+                _message, silent = payload
                 self._update_checking = False
             elif kind in ("download_ok", "download_error"):
                 self._update_downloading = False
-            if not self.about_window or not self.about_window.winfo_exists():
+            if not self._about_is_open():
                 continue
             if kind == "check_ok":
                 self.btn_check_update.configure(state="normal", text="检查更新")
-                if payload is None:
+                if info is None:
                     self.about_status_var.set("当前已是最新版本")
-                    messagebox.showinfo(
-                        "检查更新", "当前已是最新版本", parent=self.about_window
-                    )
+                    if not silent:
+                        messagebox.showinfo(
+                            "检查更新", "当前已是最新版本", parent=self.about_window
+                        )
                     continue
-                self.about_status_var.set(f"发现新版本 v{payload.version}")
-                notes = f"\n\n更新说明：\n{payload.notes}" if payload.notes else ""
+                self.about_status_var.set(f"发现新版本 v{info.version}")
+                if silent:
+                    continue
+                notes = f"\n\n更新说明：\n{info.notes}" if info.notes else ""
                 if messagebox.askyesno(
                     "发现更新",
                     f"当前版本：v{topo.APP_VERSION}\n"
-                    f"最新版本：v{payload.version}{notes}\n\n是否下载更新？",
+                    f"最新版本：v{info.version}{notes}\n\n是否下载更新？",
                     parent=self.about_window,
                 ):
-                    self._start_update_download(payload)
+                    self._start_update_download(info)
             elif kind == "check_error":
                 self.btn_check_update.configure(state="normal", text="检查更新")
                 self.about_status_var.set("检查更新失败")
-                messagebox.showerror("检查更新", payload, parent=self.about_window)
+                if not silent:
+                    messagebox.showerror(
+                        "检查更新", _message, parent=self.about_window
+                    )
             elif kind == "download_progress":
                 received, total, percent = payload
                 if total:
