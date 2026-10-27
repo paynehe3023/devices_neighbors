@@ -1,7 +1,7 @@
 {
   "version": "1.0.9",
   "download_url": "https://github.com/paynehe3023/devices_neighbors/releases/latest/download/network-topology-scanner.exe",
-  "notes": "v1.0.9：ARP 补全不再写死核心地址 10.175.10.254。① 默认自动借用「当前被扫交换机」LLDP 上联设备的 ARP 表，换网段即换来源，不再出现扫描 10.10.10.x 却去连 10.175.10.254 超时的情况；② 需要固定指定时可用环境变量 TOPO_ARP_SOURCES=IP[:设备名]（多项逗号分隔）；③ 借用 ARP 改为 5 秒短超时并做失败负缓存，同一来源每次运行只尝试一次，不会拖慢主扫描；④ 未找到可借用来源时只提示一次，仅使用本机 ARP。",
+  "notes": "v1.0.9：更新补丁",
   "published_at": "2026-10-27",
   "sha256": "3bbd17dce201ad9833916adaaf4e5348f79184e196f58dee44d416d9c7587cd1"
 }
