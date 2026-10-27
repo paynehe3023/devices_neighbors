@@ -33,7 +33,7 @@ from collections import defaultdict
 from netmiko import ConnectHandler
 
 # ==================== 配置区 ====================
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 # 凭据不落盘: 优先环境变量, 其次由交互模式/GUI/批量CSV在运行时注入
 USERNAME = os.environ.get("TOPO_USERNAME", "admin")
 PASSWORD = os.environ.get("TOPO_PASSWORD", "")
@@ -43,9 +43,22 @@ MAX_SCAN = 256                         # --recursive 防失控上限(公司网�
 MAX_WORKERS = 6                        # 并发SSH扫描数(华为默认并发会话有限, 不宜过大)
 CONN_TIMEOUT = 18                      # SSH 握手较慢, 需 >=15s
 # 附加 ARP 来源: 只登录拉 display arp 补全 MAC->IP 视角(不递归扫描),
-# 解决"终端IP在网关/核心ARP表而本机查不到"的问题。可配置多台。
-ARP_SOURCES = [{"host": "10.175.10.254", "name": "CoreSW-INTERNET-01"}]
+# 解决"终端IP在网关/核心ARP表而本机查不到"的问题。
+# 默认留空 => 自动借用"当前被扫交换机"的 LLDP 上联设备 ARP, 不写死任何地址;
+# 需要固定指定时用环境变量, 逗号分隔, 每项写 "IP" 或 "IP:设备名":
+#   TOPO_ARP_SOURCES=10.175.10.254:CoreSW-INTERNET-01,10.175.10.1
+def _parse_arp_sources(spec):
+    sources = []
+    for item in (spec or "").split(","):
+        host, _, name = item.strip().partition(":")
+        if host.strip():
+            sources.append({"host": host.strip(), "name": name.strip()})
+    return sources
+
+
+ARP_SOURCES = _parse_arp_sources(os.environ.get("TOPO_ARP_SOURCES", ""))
 AUTO_ARP_UPLINK = True                 # ARP_SOURCES 为空时, 自动尝试借用 LLDP 上联设备的 ARP
+ARP_SOURCE_TIMEOUT = 5                 # 借用 ARP 是尽力而为: 超时短, 借不到也不拖慢主扫描
 PROBE_HOSTNAME = True                  # 对终端口探测主机名(NetBIOS/mDNS); 网络关闭时静默无结果, 不影响其余功能
 TERMINAL_MAC_LIMIT = 3                 # 端口MAC数 <= 该值视为终端口(与 build_records 共用)
 OUTPUT_CSV = "port_topology.csv"
@@ -489,19 +502,20 @@ def cancel_active_connections():
         _close_connection(conn)
 
 
-def _connect(host, cancel_event=None):
-    """建立华为设备 SSH 连接(统一超时参数)"""
+def _connect(host, cancel_event=None, timeout=None):
+    """建立华为设备 SSH 连接(统一超时参数; timeout 用于借用 ARP 这类尽力而为的连接)"""
     _check_cancel(cancel_event)
     if not PASSWORD:
         raise RuntimeError("未提供交换机密码: 请设置环境变量 TOPO_PASSWORD, 或改用交互模式/GUI 输入")
+    t = CONN_TIMEOUT if timeout is None else timeout
     conn = ConnectHandler(
         device_type="huawei",
         host=host,
         username=USERNAME,
         password=PASSWORD,
-        conn_timeout=CONN_TIMEOUT,
-        auth_timeout=CONN_TIMEOUT,
-        banner_timeout=CONN_TIMEOUT,
+        conn_timeout=t,
+        auth_timeout=t,
+        banner_timeout=t,
         system_host_keys=False,
     )
     try:
@@ -515,20 +529,30 @@ def _connect(host, cancel_event=None):
 
 _ARP_CACHE = {}                          # host -> {mac: ip}, 并发扫描时同一来源只拉一次
 _ARP_LOCK = threading.Lock()
+_ARP_NO_SOURCE_HINTED = False            # 未找到上联 ARP 来源时只提示一次
 
 
 def _fetch_source_arp(host, cancel_event=None):
+    """拉取附加来源的 ARP 表。尽力而为: 短超时; 失败做负缓存, 同一来源本次运行只尝试一次。"""
     _check_cancel(cancel_event)
-    if host not in _ARP_CACHE:
-        with _ARP_LOCK:
-            _check_cancel(cancel_event)
-            if host not in _ARP_CACHE:
-                c = _connect(host, cancel_event)
-                try:
-                    raw = c.send_command("display arp", read_timeout=120)
-                finally:
-                    _close_connection(c)
-                _ARP_CACHE[host] = parse_arp(raw)
+    if host in _ARP_CACHE:
+        return _ARP_CACHE[host]
+    with _ARP_LOCK:
+        _check_cancel(cancel_event)
+        if host in _ARP_CACHE:
+            return _ARP_CACHE[host]
+        try:
+            c = _connect(host, cancel_event, timeout=ARP_SOURCE_TIMEOUT)
+            try:
+                raw = c.send_command("display arp", read_timeout=120)
+            finally:
+                _close_connection(c)
+            _ARP_CACHE[host] = parse_arp(raw)
+        except ScanCancelled:
+            raise
+        except Exception:
+            _ARP_CACHE[host] = {}     # 负缓存: 后续设备不再重复尝试该地址
+            raise
     return _ARP_CACHE[host]
 
 
@@ -537,11 +561,20 @@ def enrich_arp_from_sources(data, cancel_event=None):
     只拉取 display arp 一张表(不递归扫描其他数据); 本机 ARP 优先级最高, 缺失的用网关补。"""
     sources = list(ARP_SOURCES)
     if AUTO_ARP_UPLINK and not sources:
+        self_host = data.get("host", "")
         for rec in data["lldp_verbose"].values():
             ip = rec.get("remote_ip", "")
-            if ip and role_of(rec.get("remote_dev", ""), rec.get("model", ""), rec.get("sys_desc", "")) >= ROLE_SW:
+            if not ip or ip == self_host:
+                continue
+            if role_of(rec.get("remote_dev", ""), rec.get("model", ""), rec.get("sys_desc", "")) >= ROLE_SW:
                 sources.append({"host": ip, "name": rec.get("remote_dev", "")})
                 break   # 只借第一台上联设备, 保持轻量
+        if not sources:
+            global _ARP_NO_SOURCE_HINTED
+            if not _ARP_NO_SOURCE_HINTED:      # 整个扫描过程只提示一次, 避免刷屏
+                _ARP_NO_SOURCE_HINTED = True
+                print("  ℹ 未找到可借用的上联 ARP 来源(LLDP 未给出可达的上联管理IP), 仅使用本机 ARP;"
+                      " 需要固定指定时设环境变量 TOPO_ARP_SOURCES=IP[:设备名]")
     merged = {}
     for s in sources:
         _check_cancel(cancel_event)
